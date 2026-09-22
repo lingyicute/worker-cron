@@ -29,7 +29,7 @@ jobs:
           echo "查找文件名为十位整数的文件..."
           # 递归查找所有文件（排除 .git），文件名恰好为 10 位数字的删除
           # 例如：1234567890 会被删，1234567890.txt / 123456789 不会被删
-          find . -path ./.git -prune -o -type f -regextype posix-extended -regex '.*/[0-9]{10}$' -print -delete
+          find . -path ./.git -prune -o -type f -regextype posix-extended -regex '.*/[0-9]{10}$' -print -exec rm {} +
           echo "删除完成，当前变更："
           git status --short || true
 
