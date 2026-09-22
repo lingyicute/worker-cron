@@ -17,17 +17,6 @@ export default {
 
   // Optional: allow manual trigger via HTTP for testing
   async fetch(request, env, ctx) {
-    if (request.method === "POST") {
-      try {
-        const result = await createTimestampFile(env);
-        return Response.json({ ok: true, ...result });
-      } catch (err) {
-        return Response.json(
-          { ok: false, error: err.message },
-          { status: 500 }
-        );
-      }
-    }
     return new Response(
       "Cloudflare Worker: scheduled GitHub file creator. POST to run manually.",
       { status: 200 }
