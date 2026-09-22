@@ -18,7 +18,7 @@ export default {
   // Optional: allow manual trigger via HTTP for testing
   async fetch(request, env, ctx) {
     return new Response(
-      "Cloudflare Worker: scheduled GitHub file creator. POST to run manually.",
+      "404",
       { status: 200 }
     );
   },
