@@ -1,5 +1,4 @@
-name: Trigger sbwatch and cleanup
-
+name: Trigger and cleanup
 
 on:
   workflow_dispatch:
@@ -24,7 +23,7 @@ jobs:
         run: |
           gh workflow run sbwatch.yml -R lingyicute/secureblue-watchdog
 
-      - name: Delete files named as 10-digit integers
+      - name: Delete temp files
         run: |
           echo "查找文件名为十位整数的文件..."
           # 递归查找所有文件（排除 .git），文件名恰好为 10 位数字的删除
@@ -42,5 +41,5 @@ jobs:
             echo "没有文件被删除，无需提交。"
             exit 0
           fi
-          git commit -m "chore: 删除文件名为十位整数的文件"
+          git commit -m "chore: 删除临时文件"
           git push origin HEAD
