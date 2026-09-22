@@ -1,0 +1,46 @@
+name: Trigger sbwatch and cleanup
+
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  trigger-and-cleanup:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Trigger sbwatch.yml in secureblue-watchdog
+        env:
+          GH_TOKEN: ${{ secrets.token1 }}
+        run: |
+          gh workflow run sbwatch.yml -R lingyicute/secureblue-watchdog
+
+      - name: Delete files named as 10-digit integers
+        run: |
+          echo "查找文件名为十位整数的文件..."
+          # 递归查找所有文件（排除 .git），文件名恰好为 10 位数字的删除
+          # 例如：1234567890 会被删，1234567890.txt / 123456789 不会被删
+          find . -path ./.git -prune -o -type f -regextype posix-extended -regex '.*/[0-9]{10}$' -print -delete
+          echo "删除完成，当前变更："
+          git status --short || true
+
+      - name: Commit and push as lingyicute
+        run: |
+          git config user.name "lingyicute"
+          git config user.email "160479206+lingyicute@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "没有文件被删除，无需提交。"
+            exit 0
+          fi
+          git commit -m "chore: 删除文件名为十位整数的文件"
+          git push origin HEAD
