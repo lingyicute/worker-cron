@@ -3,11 +3,10 @@
  *
  * Env vars (Secrets / Variables):
  *   GITHUB_TOKEN  — GitHub personal access token with contents:write
- *   GITHUB_REPO   — repository in "owner/repo" form, e.g. "octocat/hello-world"
+ *   GITHUB_REPO   — repository in "owner/repo" form, e.g. "lingyicute/worker-cron"
  *
- * wrangler.toml should define a cron trigger, e.g.:
- *   [triggers]
- *   crons = ["0 * * * *"]
+ * Copyright 2024-2026 lingyicute
+ * 
  */
 
 export default {
