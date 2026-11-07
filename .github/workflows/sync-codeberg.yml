@@ -27,7 +27,6 @@ jobs:
           git init -q --bare "$RUNNER_TEMP/sync.git"
           cd "$RUNNER_TEMP/sync.git"
 
-          # 我的 GitHub 仓库全是公开的，一行一个："名字 默认分支"
           repos=$(gh api --paginate "users/$OWNER/repos" --jq '.[] | "\(.name) \(.default_branch)"')
 
           while read -r name gh_branch <&3; do
@@ -36,7 +35,6 @@ jobs:
 
             # Codeberg 上没有同名仓库：跳过
             code=$(curl -sS -o "$RUNNER_TEMP/cb.json" -w '%{http_code}' \
-              -H "Authorization: token $CODEBERG_TOKEN" \
               "https://codeberg.org/api/v1/repos/$OWNER/$name")
             if [ "$code" = 404 ]; then
               echo "skip $name (not on Codeberg)"
