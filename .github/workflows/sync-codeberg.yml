@@ -1,0 +1,73 @@
+name: Sync default branches to Codeberg
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: sync-codeberg
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Sync
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+        run: |
+          set -euo pipefail
+          OWNER=lingyicute
+
+          git init -q --bare "$RUNNER_TEMP/sync.git"
+          cd "$RUNNER_TEMP/sync.git"
+
+          # 我的 GitHub 仓库全是公开的，一行一个："名字 默认分支"
+          repos=$(gh api --paginate "users/$OWNER/repos" --jq '.[] | "\(.name) \(.default_branch)"')
+
+          while read -r name gh_branch <&3; do
+            gh_url="https://github.com/$OWNER/$name.git"
+            cb_url="https://$OWNER:$CODEBERG_TOKEN@codeberg.org/$OWNER/$name.git"
+
+            # Codeberg 上没有同名仓库：跳过
+            code=$(curl -sS -o "$RUNNER_TEMP/cb.json" -w '%{http_code}' \
+              -H "Authorization: token $CODEBERG_TOKEN" \
+              "https://codeberg.org/api/v1/repos/$OWNER/$name")
+            if [ "$code" = 404 ]; then
+              echo "skip $name (not on Codeberg)"
+              continue
+            fi
+            if [ "$code" != 200 ]; then
+              echo "::error::$name: Codeberg API returned HTTP $code"
+              exit 1
+            fi
+
+            # 默认分支不一致：报错
+            cb_branch=$(jq -r .default_branch "$RUNNER_TEMP/cb.json")
+            if [ "$cb_branch" != "$gh_branch" ]; then
+              echo "::error::$name: default branch differs (GitHub: $gh_branch, Codeberg: $cb_branch)"
+              exit 1
+            fi
+
+            git fetch -q --no-tags "$gh_url" "$gh_branch"
+            gh_sha=$(git rev-parse FETCH_HEAD)
+
+            # Codeberg 的提交必须是 GitHub 的祖先，否则就不是单纯追加 commit：报错
+            if [ "$(jq -r .empty "$RUNNER_TEMP/cb.json")" = false ]; then
+              git fetch -q --no-tags "$cb_url" "$cb_branch"
+              cb_sha=$(git rev-parse FETCH_HEAD)
+              if ! git merge-base --is-ancestor "$cb_sha" "$gh_sha"; then
+                echo "::error::$name: Codeberg/$cb_branch is not an ancestor of GitHub/$gh_branch (not append-only)"
+                exit 1
+              fi
+            fi
+
+            # 普通 push，不加 --force
+            git push -q "$cb_url" "$gh_sha:refs/heads/$gh_branch"
+            echo "synced $name ($gh_branch)"
+          done 3<<< "$repos"
