@@ -21,7 +21,8 @@
 目前，每半小时它会：
 
 1. **触发一次 [secureblue-watchdog](https://github.com/lingyicute/secureblue-watchdog) 的 `sbwatch.yml`**（secureblue update watch）；
-2. 如果我需要，我还会加入其它定时任务。
+2. **更新一遍 Codeberg 上的镜像仓库**;
+3. 如果我需要，我还会加入其它定时任务。
 
 完整链路：
 
@@ -78,7 +79,8 @@ This project runs a Cloudflare Worker that automatically commits a **useless tim
 Every 30 minutes it:
 
 1. **Triggers `sbwatch.yml` (secureblue update watch) in [secureblue-watchdog](https://github.com/lingyicute/secureblue-watchdog);**
-2. more scheduled tasks will be added here if I ever need them.
+2. **Iterate through and update mirror repositories on Codeberg;**
+3. more scheduled tasks will be added here if I ever need them.
 
 The chain:
 
