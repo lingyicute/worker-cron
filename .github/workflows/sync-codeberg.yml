@@ -2,6 +2,13 @@ name: Sync default branches to mirrors (Codeberg / GitLab / Gitea)
 
 on:
   workflow_dispatch:
+    inputs:
+      force_push:
+        description: >-
+          Force push 模式：正常遍历同步；遇到「镜像站分支不是 GitHub 祖先」的仓库时
+          打印警告并 force push（用 GitHub 覆盖镜像站）。仅手动触发时有效。
+        type: boolean
+        default: false
   push:
     branches: [main]
 
@@ -50,6 +57,8 @@ jobs:
           TARGET_GIT_USER: ${{ matrix.git_user }}
           TARGET_TOKEN: ${{ secrets[matrix.token_secret] }}
           TOKEN_SECRET_NAME: ${{ matrix.token_secret }}
+          # 仅手动触发且勾选 force_push 时为 true；push / 定时等触发一律为 false
+          FORCE_PUSH: ${{ github.event_name == 'workflow_dispatch' && inputs.force_push == true }}
         run: |
           # ------------------------------------------------------------------
           #  2026.11.17
@@ -63,6 +72,10 @@ jobs:
           #      不再 fetch 目标站；目标 sha 若不在 GitHub 历史里即视为非追加。
           #   6. 所有网络请求带指数退避重试，请求之间少量间隔；单个仓库出错不会中断其余
           #      仓库，最后统一报错。
+          #   7. Force push 模式（仅 workflow_dispatch 且勾选 force_push）：流程不变，
+          #      只有在发现「镜像站分支不是 GitHub 祖先」的仓库时，才打印警告并
+          #      用 --force-with-lease（锁定刚才 ls-remote 到的 sha）强推；其余仓库
+          #      仍走普通 push。
           # ------------------------------------------------------------------
           set -euo pipefail
           export GIT_TERMINAL_PROMPT=0
@@ -188,6 +201,15 @@ jobs:
           synced=0
           uptodate=0
           skipped=0
+          forced=0
+          forced_list=""
+
+          if [ "$FORCE_PUSH" = true ]; then
+            echo "::warning title=Force push mode ON ($TARGET_NAME)::Force push 模式已开启：发现非追加（non-fast-forward）的仓库时将强制覆盖 $TARGET_NAME 上的默认分支"
+            echo "Force push mode: ON  (target: $TARGET_NAME)"
+          else
+            echo "Force push mode: off"
+          fi
 
           while read -r name gh_branch gh_sha <&3; do
             [ -z "$name" ] && continue
@@ -239,19 +261,63 @@ jobs:
               gh_sha=$fetched_sha
             fi
 
-            # 镜像站提交必须是 GitHub 的祖先，否则就不是单纯追加 commit：报错
+            # 镜像站提交必须是 GitHub 的祖先，否则就不是单纯追加 commit：
+            #   - 普通模式：报错并跳过
+            #   - force push 模式：打印警告，然后 force push
             # （目标 sha 不在 GitHub 历史中时，对象不存在，同样视为非祖先）
+            need_force=0
             if [ -n "$target_sha" ]; then
               if ! git cat-file -e "$target_sha^{commit}" 2>/dev/null \
                  || ! git merge-base --is-ancestor "$target_sha" "$gh_sha"; then
-                echo "::error::$name: $TARGET_NAME/$gh_branch ($target_sha) is not an ancestor of GitHub/$gh_branch (not append-only)"
-                failed=$((failed + 1))
-                continue
+                if [ "$FORCE_PUSH" = true ]; then
+                  need_force=1
+                  echo "::warning title=FORCE PUSH $TARGET_NAME/$name::$name: $TARGET_NAME/$gh_branch ($target_sha) is not an ancestor of GitHub/$gh_branch -> FORCE PUSHING"
+                  {
+                    echo ""
+                    echo ""
+                    echo ""
+                    echo ""
+                    echo ""
+                    echo ""
+                    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+                    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+                    echo "!!!!!!!!!!!!!!!!!!!!!!"
+                    echo "!!!!!!!!!!!!!!!!!!!!!!  WARNING: FORCE PUSH  ->  $TARGET_NAME/$TARGET_OWNER/$name ($gh_branch)"
+                    echo "!!!!!!!!!!!!!!!!!!!!!!  $TARGET_NAME 上的分支不是 GitHub 的祖先（非追加），将实施强制覆盖！"
+                    echo "!!!!!!!!!!!!!!!!!!!!!!    old ($TARGET_NAME): $target_sha"
+                    echo "!!!!!!!!!!!!!!!!!!!!!!    new (GitHub)      : $gh_sha"
+                    echo "!!!!!!!!!!!!!!!!!!!!!!"
+                    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+                    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+                    echo ""
+                    echo ""
+                    echo ""
+                    echo ""
+                    echo ""
+                    echo ""
+                  } >&2
+                else
+                  echo "::error::$name: $TARGET_NAME/$gh_branch ($target_sha) is not an ancestor of GitHub/$gh_branch (not append-only; re-run with force_push to overwrite)"
+                  failed=$((failed + 1))
+                  continue
+                fi
               fi
             fi
 
+            if [ "$need_force" = 1 ]; then
+              # --force-with-lease 显式锁定期望的旧 sha：若镜像站在此期间又有改动则拒绝覆盖
+              if retry git push -q --force-with-lease="refs/heads/$gh_branch:$target_sha" \
+                   "$target_url" "$gh_sha:refs/heads/$gh_branch"; then
+                echo "::warning title=FORCE PUSHED $TARGET_NAME/$name::$name: force pushed $gh_branch ($target_sha -> $gh_sha)"
+                echo "FORCE-PUSHED $name ($gh_branch) -> $TARGET_NAME  [$target_sha -> $gh_sha]"
+                forced=$((forced + 1))
+                forced_list+="$name ($target_sha -> $gh_sha)"$'\n'
+              else
+                echo "::error::$name: force push to $TARGET_NAME failed (分支保护是否禁止了 force push？)"
+                failed=$((failed + 1))
+              fi
             # 普通 push，不加 --force
-            if retry git push -q "$target_url" "$gh_sha:refs/heads/$gh_branch"; then
+            elif retry git push -q "$target_url" "$gh_sha:refs/heads/$gh_branch"; then
               echo "synced $name ($gh_branch) -> $TARGET_NAME"
               synced=$((synced + 1))
             else
@@ -261,7 +327,16 @@ jobs:
             sleep "$REQUEST_DELAY"
           done 3<<< "$gh_repos"
 
-          echo "Summary [$TARGET_NAME]: synced=$synced up-to-date=$uptodate skipped=$skipped failed=$failed"
+          echo "Summary [$TARGET_NAME]: synced=$synced forced=$forced up-to-date=$uptodate skipped=$skipped failed=$failed"
+          if [ "$forced" -gt 0 ]; then
+            echo "::warning title=Force pushed repos on $TARGET_NAME::$forced 个仓库被 force push，详见日志与 Job Summary"
+            {
+              echo "### :warning: Force pushed on $TARGET_NAME ($forced)"
+              echo '```'
+              printf '%s' "$forced_list"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [ "$failed" -gt 0 ]; then
             exit 1
           fi
