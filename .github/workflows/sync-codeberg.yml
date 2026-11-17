@@ -1,4 +1,4 @@
-name: Sync default branches to mirrors (Codeberg / GitLab / Gitea / Framagit / GitGud)
+name: Sync default branches to mirrors (Codeberg / GitLab / Gitea / Framagit / GitGud / Bitbucket)
 
 on:
   workflow_dispatch:
@@ -78,6 +78,12 @@ jobs:
             owner: lingyicute
             git_user: oauth2
             token_secret: GITGUD_TOKEN
+          - name: Bitbucket
+            kind: bitbucket
+            host: bitbucket.org
+            owner: lingyicute
+            git_user: x-bitbucket-api-token-auth
+            token_secret: BITBUCKET_TOKEN
 
     steps:
       - name: Sync
@@ -210,10 +216,14 @@ jobs:
           # ---- 2. 目标站：分页列出已有仓库（name 默认分支） --------------------
           target_repos=""
           page=1
+          next_url=""
           while :; do
             if [ "$TARGET_KIND" = gitlab ]; then
               url="https://$TARGET_HOST/api/v4/users/$TARGET_OWNER/projects?per_page=100&page=$page"
               filter='.[] | "\(.path) \(.default_branch // "")"'
+            elif [ "$TARGET_KIND" = bitbucket ]; then
+              url="${next_url:-https://api.bitbucket.org/2.0/repositories/$TARGET_OWNER?pagelen=100}"
+              filter='.values[] | "\(.slug) \(.mainbranch.name // "")"'
             else
               url="https://$TARGET_HOST/api/v1/users/$TARGET_OWNER/repos?limit=50&page=$page"
               filter='.[] | "\(.name) \(.default_branch // "")"'
@@ -222,6 +232,10 @@ jobs:
             lines=$(jq -r "$filter" <<< "$resp")
             [ -z "$lines" ] && break
             target_repos+="$lines"$'\n'
+            if [ "$TARGET_KIND" = bitbucket ]; then
+              next_url=$(jq -r '.next // empty' <<< "$resp")
+              [ -z "$next_url" ] && break
+            fi
             page=$((page + 1))
             sleep "$REQUEST_DELAY"
           done
@@ -247,14 +261,20 @@ jobs:
           while read -r name gh_branch gh_sha <&3; do
             [ -z "$name" ] && continue
 
+            # 目标站上的仓库名：Bitbucket 的 slug 全部小写，其余站点与 GitHub 同名
+            tname=$name
+            if [ "$TARGET_KIND" = bitbucket ]; then
+              tname=${name,,}
+            fi
+
             # 目标站上没同名仓库：跳过
-            if [ "$(awk -v n="$name" '$1==n{c++} END{print c+0}' <<< "$target_repos")" = 0 ]; then
+            if [ "$(awk -v n="$tname" '$1==n{c++} END{print c+0}' <<< "$target_repos")" = 0 ]; then
               echo "skip $name (not on $TARGET_NAME)"
               skipped=$((skipped + 1))
               continue
             fi
 
-            target_branch=$(awk -v n="$name" '$1==n{print $2; exit}' <<< "$target_repos")
+            target_branch=$(awk -v n="$tname" '$1==n{print $2; exit}' <<< "$target_repos")
 
             # 目标站是空仓库时 default_branch 可能为空，此时不做分支名比较
             if [ -n "$target_branch" ] && [ "$target_branch" != "$gh_branch" ]; then
@@ -263,7 +283,7 @@ jobs:
               continue
             fi
 
-            target_url="https://$TARGET_GIT_USER:$TARGET_TOKEN@$TARGET_HOST/$TARGET_OWNER/$name.git"
+            target_url="https://$TARGET_GIT_USER:$TARGET_TOKEN@$TARGET_HOST/$TARGET_OWNER/$tname.git"
 
             # ---- 3. 只问目标站这一个分支的 sha（git ls-remote） ----
             if ! ls=$(retry git ls-remote "$target_url" "refs/heads/$gh_branch" 2>/dev/null); then
