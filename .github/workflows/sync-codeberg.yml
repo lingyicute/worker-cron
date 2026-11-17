@@ -120,6 +120,31 @@ jobs:
             done
           }
 
+          api_get_noauth() {
+            local url=$1 n=1 code wait
+            local body="$RUNNER_TEMP/api.body" hdr="$RUNNER_TEMP/api.hdr"
+            while :; do
+              code=$(curl -sS -o "$body" -D "$hdr" -w '%{http_code}' \
+                 "$url" || echo 000)
+              if [ "$code" = 200 ]; then
+                cat "$body"
+                return 0
+              fi
+              if { [ "$code" = 429 ] || [ "$code" -ge 500 ] || [ "$code" = 000 ]; } \
+                 && [ "$n" -lt "$MAX_ATTEMPTS" ]; then
+                wait=$(awk -F': ' 'tolower($1)=="retry-after"{gsub(/\r/,"",$2); print $2}' "$hdr" | tail -n1)
+                case "$wait" in ''|*[!0-9]*) wait=$((15 * 2 ** (n - 1)));; esac
+                [ "$wait" -gt 300 ] && wait=300
+                echo "  HTTP $code from $TARGET_NAME API, retrying in ${wait}s" >&2
+                sleep "$wait"
+                n=$((n + 1))
+                continue
+              fi
+              echo "  HTTP $code from $TARGET_NAME API: $url" >&2
+              return 1
+            done
+          }
+
           # ---- 1. GitHub：一次性拿到 name / 默认分支 / HEAD sha ----------------
           gh_repos=$(retry gh api graphql --paginate \
             -f owner="$OWNER" \
@@ -147,7 +172,7 @@ jobs:
               url="https://$TARGET_HOST/api/v1/users/$TARGET_OWNER/repos?limit=50&page=$page"
               filter='.[] | "\(.name) \(.default_branch // "")"'
             fi
-            resp=$(api_get "$url") || { echo "::error::Failed to list repos on $TARGET_NAME"; exit 1; }
+            resp=$(api_get_noauth "$url") || { echo "::error::Failed to list repos on $TARGET_NAME"; exit 1; }
             lines=$(jq -r "$filter" <<< "$resp")
             [ -z "$lines" ] && break
             target_repos+="$lines"$'\n'
