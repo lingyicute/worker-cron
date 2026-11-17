@@ -100,7 +100,7 @@ jobs:
             local body="$RUNNER_TEMP/api.body" hdr="$RUNNER_TEMP/api.hdr"
             while :; do
               code=$(curl -sS -o "$body" -D "$hdr" -w '%{http_code}' \
-                -H "$auth_header" "$url" || echo 000)
+                -H "$auth_header" "$url") || code=000
               if [ "$code" = 200 ]; then
                 cat "$body"
                 return 0
@@ -125,7 +125,7 @@ jobs:
             local body="$RUNNER_TEMP/api.body" hdr="$RUNNER_TEMP/api.hdr"
             while :; do
               code=$(curl -sS -o "$body" -D "$hdr" -w '%{http_code}' \
-                 "$url" || echo 000)
+                 "$url") || code=000
               if [ "$code" = 200 ]; then
                 cat "$body"
                 return 0
