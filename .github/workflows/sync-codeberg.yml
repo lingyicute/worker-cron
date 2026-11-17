@@ -1,4 +1,4 @@
-name: Sync default branches to Codeberg
+name: Sync default branches to mirrors (Codeberg / GitLab / Gitea)
 
 on:
   workflow_dispatch:
@@ -6,23 +6,58 @@ on:
     branches: [main]
 
 concurrency:
-  group: sync-codeberg
+  group: sync-mirrors
   cancel-in-progress: false
 
 jobs:
   sync:
+    name: Sync to ${{ matrix.name }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Codeberg
+            kind: gitea
+            host: codeberg.org
+            owner: lingyicute
+            git_user: lingyicute
+            token_secret: CODEBERG_TOKEN
+          - name: GitLab
+            kind: gitlab
+            host: gitlab.com
+            owner: lingyicute
+            git_user: oauth2
+            token_secret: GITLAB_TOKEN
+          - name: Gitea
+            kind: gitea
+            host: gitea.com
+            owner: lingyicute
+            git_user: lingyicute
+            token_secret: GITEA_TOKEN
 
     steps:
       - name: Sync
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+          TARGET_NAME: ${{ matrix.name }}
+          TARGET_KIND: ${{ matrix.kind }}
+          TARGET_HOST: ${{ matrix.host }}
+          TARGET_OWNER: ${{ matrix.owner }}
+          TARGET_GIT_USER: ${{ matrix.git_user }}
+          TARGET_TOKEN: ${{ secrets[matrix.token_secret] }}
+          TOKEN_SECRET_NAME: ${{ matrix.token_secret }}
         run: |
           set -euo pipefail
           OWNER=lingyicute
+
+          if [ -z "$TARGET_TOKEN" ]; then
+            echo "::error::Secret $TOKEN_SECRET_NAME is not set (needed for $TARGET_NAME)"
+            exit 1
+          fi
 
           git init -q --bare "$RUNNER_TEMP/sync.git"
           cd "$RUNNER_TEMP/sync.git"
@@ -31,41 +66,51 @@ jobs:
 
           while read -r name gh_branch <&3; do
             gh_url="https://github.com/$OWNER/$name.git"
-            cb_url="https://$OWNER:$CODEBERG_TOKEN@codeberg.org/$OWNER/$name.git"
+            target_url="https://$TARGET_GIT_USER:$TARGET_TOKEN@$TARGET_HOST/$TARGET_OWNER/$name.git"
 
-            # Codeberg 上没有同名仓库：跳过
-            code=$(curl -sS -o "$RUNNER_TEMP/cb.json" -w '%{http_code}' \
-              "https://codeberg.org/api/v1/repos/$OWNER/$name")
+            if [ "$TARGET_KIND" = gitlab ]; then
+              api_url="https://$TARGET_HOST/api/v4/projects/$TARGET_OWNER%2F$name"
+              auth_header="PRIVATE-TOKEN: $TARGET_TOKEN"
+              empty_filter='.empty_repo'
+            else
+              api_url="https://$TARGET_HOST/api/v1/repos/$TARGET_OWNER/$name"
+              auth_header="Authorization: token $TARGET_TOKEN"
+              empty_filter='.empty'
+            fi
+
+            # 目标站上没有同名仓库：跳过
+            code=$(curl -sS -o "$RUNNER_TEMP/target.json" -w '%{http_code}' \
+              -H "$auth_header" "$api_url")
             if [ "$code" = 404 ]; then
-              echo "skip $name (not on Codeberg)"
+              echo "skip $name (not on $TARGET_NAME)"
               continue
             fi
             if [ "$code" != 200 ]; then
-              echo "::error::$name: Codeberg API returned HTTP $code"
+              echo "::error::$name: $TARGET_NAME API returned HTTP $code"
               exit 1
             fi
 
             # 默认分支不一致：报错
-            cb_branch=$(jq -r .default_branch "$RUNNER_TEMP/cb.json")
-            if [ "$cb_branch" != "$gh_branch" ]; then
-              echo "::error::$name: default branch differs (GitHub: $gh_branch, Codeberg: $cb_branch)"
+            target_branch=$(jq -r .default_branch "$RUNNER_TEMP/target.json")
+            if [ "$target_branch" != "$gh_branch" ]; then
+              echo "::error::$name: default branch differs (GitHub: $gh_branch, $TARGET_NAME: $target_branch)"
               exit 1
             fi
 
             git fetch -q --no-tags "$gh_url" "$gh_branch"
             gh_sha=$(git rev-parse FETCH_HEAD)
 
-            # Codeberg 的提交必须是 GitHub 的祖先，否则就不是单纯追加 commit：报错
-            if [ "$(jq -r .empty "$RUNNER_TEMP/cb.json")" = false ]; then
-              git fetch -q --no-tags "$cb_url" "$cb_branch"
-              cb_sha=$(git rev-parse FETCH_HEAD)
-              if ! git merge-base --is-ancestor "$cb_sha" "$gh_sha"; then
-                echo "::error::$name: Codeberg/$cb_branch is not an ancestor of GitHub/$gh_branch (not append-only)"
+            # 镜像站的提交必须是 GitHub 的祖先，否则就不是单纯追加 commit：报错
+            if [ "$(jq -r "$empty_filter" "$RUNNER_TEMP/target.json")" = false ]; then
+              git fetch -q --no-tags "$target_url" "$target_branch"
+              target_sha=$(git rev-parse FETCH_HEAD)
+              if ! git merge-base --is-ancestor "$target_sha" "$gh_sha"; then
+                echo "::error::$name: $TARGET_NAME/$target_branch is not an ancestor of GitHub/$gh_branch (not append-only)"
                 exit 1
               fi
             fi
 
             # 普通 push，不加 --force
-            git push -q "$cb_url" "$gh_sha:refs/heads/$gh_branch"
-            echo "synced $name ($gh_branch)"
+            git push -q "$target_url" "$gh_sha:refs/heads/$gh_branch"
+            echo "synced $name ($gh_branch) -> $TARGET_NAME"
           done 3<<< "$repos"
