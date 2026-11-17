@@ -51,66 +51,192 @@ jobs:
           TARGET_TOKEN: ${{ secrets[matrix.token_secret] }}
           TOKEN_SECRET_NAME: ${{ matrix.token_secret }}
         run: |
+          # ------------------------------------------------------------------
+          #  2026.11.17
+          #   1. GitHub 侧：用 1 次 GraphQL（分页）一次性拿到所有仓库的
+          #      「名称 / 默认分支 / HEAD sha」，不再逐仓库 git fetch 来取 sha。
+          #   2. 目标站：用 1 次分页列表 API 取代逐仓库 GET（404 探测 + 默认分支），
+          #      列表里没有的仓库直接跳过。
+          #   3. 目标站分支 sha：对已存在的仓库只做 1 次 git ls-remote
+          #   4. sha 与 GitHub 相同 → 直接跳过，不 fetch、不 push（常态下绝大多数仓库）
+          #   5. 只有 sha 不同才 fetch GitHub，并且「祖先检查」直接用本地对象完成，
+          #      不再 fetch 目标站；目标 sha 若不在 GitHub 历史里即视为非追加。
+          #   6. 所有网络请求带指数退避重试，请求之间少量间隔；单个仓库出错不会中断其余
+          #      仓库，最后统一报错。
+          # ------------------------------------------------------------------
           set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0
           OWNER=lingyicute
+          REQUEST_DELAY=0.5     # 对目标站连续请求之间的间隔（秒）
+          MAX_ATTEMPTS=5
 
           if [ -z "$TARGET_TOKEN" ]; then
             echo "::error::Secret $TOKEN_SECRET_NAME is not set (needed for $TARGET_NAME)"
             exit 1
           fi
 
+          # 通用重试：指数退避 15s / 30s / 60s / 120s
+          retry() {
+            local n=1 delay=15
+            until "$@"; do
+              if [ "$n" -ge "$MAX_ATTEMPTS" ]; then
+                return 1
+              fi
+              echo "  attempt $n failed, retrying in ${delay}s: $1 $2" >&2
+              sleep "$delay"
+              n=$((n + 1))
+              delay=$((delay * 2))
+            done
+          }
+
+          # 带 429/5xx 处理的 API GET：成功时把响应体输出到 stdout
+          if [ "$TARGET_KIND" = gitlab ]; then
+            auth_header="PRIVATE-TOKEN: $TARGET_TOKEN"
+          else
+            auth_header="Authorization: token $TARGET_TOKEN"
+          fi
+          api_get() {
+            local url=$1 n=1 code wait
+            local body="$RUNNER_TEMP/api.body" hdr="$RUNNER_TEMP/api.hdr"
+            while :; do
+              code=$(curl -sS -o "$body" -D "$hdr" -w '%{http_code}' \
+                -H "$auth_header" "$url" || echo 000)
+              if [ "$code" = 200 ]; then
+                cat "$body"
+                return 0
+              fi
+              if { [ "$code" = 429 ] || [ "$code" -ge 500 ] || [ "$code" = 000 ]; } \
+                 && [ "$n" -lt "$MAX_ATTEMPTS" ]; then
+                wait=$(awk -F': ' 'tolower($1)=="retry-after"{gsub(/\r/,"",$2); print $2}' "$hdr" | tail -n1)
+                case "$wait" in ''|*[!0-9]*) wait=$((15 * 2 ** (n - 1)));; esac
+                [ "$wait" -gt 300 ] && wait=300
+                echo "  HTTP $code from $TARGET_NAME API, retrying in ${wait}s" >&2
+                sleep "$wait"
+                n=$((n + 1))
+                continue
+              fi
+              echo "  HTTP $code from $TARGET_NAME API: $url" >&2
+              return 1
+            done
+          }
+
+          # ---- 1. GitHub：一次性拿到 name / 默认分支 / HEAD sha ----------------
+          gh_repos=$(retry gh api graphql --paginate \
+            -f owner="$OWNER" \
+            -f query='
+              query($owner: String!, $endCursor: String) {
+                repositoryOwner(login: $owner) {
+                  repositories(first: 100, after: $endCursor, privacy: PUBLIC, ownerAffiliations: OWNER) {
+                    nodes { name defaultBranchRef { name target { oid } } }
+                    pageInfo { hasNextPage endCursor }
+                  }
+                }
+              }' \
+            --jq '.data.repositoryOwner.repositories.nodes[]
+                  | select(.defaultBranchRef != null)
+                  | "\(.name) \(.defaultBranchRef.name) \(.defaultBranchRef.target.oid)"')
+
+          # ---- 2. 目标站：分页列出已有仓库（name 默认分支） --------------------
+          target_repos=""
+          page=1
+          while :; do
+            if [ "$TARGET_KIND" = gitlab ]; then
+              url="https://$TARGET_HOST/api/v4/users/$TARGET_OWNER/projects?per_page=100&page=$page"
+              filter='.[] | "\(.path) \(.default_branch // "")"'
+            else
+              url="https://$TARGET_HOST/api/v1/users/$TARGET_OWNER/repos?limit=50&page=$page"
+              filter='.[] | "\(.name) \(.default_branch // "")"'
+            fi
+            resp=$(api_get "$url") || { echo "::error::Failed to list repos on $TARGET_NAME"; exit 1; }
+            lines=$(jq -r "$filter" <<< "$resp")
+            [ -z "$lines" ] && break
+            target_repos+="$lines"$'\n'
+            page=$((page + 1))
+            sleep "$REQUEST_DELAY"
+          done
+          echo "GitHub: $(grep -c . <<< "$gh_repos") repos, $TARGET_NAME: $(grep -c . <<< "$target_repos") repos"
+
           git init -q --bare "$RUNNER_TEMP/sync.git"
           cd "$RUNNER_TEMP/sync.git"
 
-          repos=$(gh api --paginate "users/$OWNER/repos" --jq '.[] | "\(.name) \(.default_branch)"')
+          failed=0
+          synced=0
+          uptodate=0
+          skipped=0
 
-          while read -r name gh_branch <&3; do
-            gh_url="https://github.com/$OWNER/$name.git"
-            target_url="https://$TARGET_GIT_USER:$TARGET_TOKEN@$TARGET_HOST/$TARGET_OWNER/$name.git"
+          while read -r name gh_branch gh_sha <&3; do
+            [ -z "$name" ] && continue
 
-            if [ "$TARGET_KIND" = gitlab ]; then
-              api_url="https://$TARGET_HOST/api/v4/projects/$TARGET_OWNER%2F$name"
-              auth_header="PRIVATE-TOKEN: $TARGET_TOKEN"
-              empty_filter='.empty_repo'
-            else
-              api_url="https://$TARGET_HOST/api/v1/repos/$TARGET_OWNER/$name"
-              auth_header="Authorization: token $TARGET_TOKEN"
-              empty_filter='.empty'
-            fi
-
-            # 目标站上没有同名仓库：跳过
-            code=$(curl -sS -o "$RUNNER_TEMP/target.json" -w '%{http_code}' \
-              -H "$auth_header" "$api_url")
-            if [ "$code" = 404 ]; then
+            # 目标站上没同名仓库：跳过
+            if [ "$(awk -v n="$name" '$1==n{c++} END{print c+0}' <<< "$target_repos")" = 0 ]; then
               echo "skip $name (not on $TARGET_NAME)"
+              skipped=$((skipped + 1))
               continue
             fi
-            if [ "$code" != 200 ]; then
-              echo "::error::$name: $TARGET_NAME API returned HTTP $code"
-              exit 1
-            fi
 
-            # 默认分支不一致：报错
-            target_branch=$(jq -r .default_branch "$RUNNER_TEMP/target.json")
-            if [ "$target_branch" != "$gh_branch" ]; then
+            target_branch=$(awk -v n="$name" '$1==n{print $2; exit}' <<< "$target_repos")
+
+            # 目标站是空仓库时 default_branch 可能为空，此时不做分支名比较
+            if [ -n "$target_branch" ] && [ "$target_branch" != "$gh_branch" ]; then
               echo "::error::$name: default branch differs (GitHub: $gh_branch, $TARGET_NAME: $target_branch)"
-              exit 1
+              failed=$((failed + 1))
+              continue
             fi
 
-            git fetch -q --no-tags "$gh_url" "$gh_branch"
-            gh_sha=$(git rev-parse FETCH_HEAD)
+            target_url="https://$TARGET_GIT_USER:$TARGET_TOKEN@$TARGET_HOST/$TARGET_OWNER/$name.git"
 
-            # 镜像站的提交必须是 GitHub 的祖先，否则就不是单纯追加 commit：报错
-            if [ "$(jq -r "$empty_filter" "$RUNNER_TEMP/target.json")" = false ]; then
-              git fetch -q --no-tags "$target_url" "$target_branch"
-              target_sha=$(git rev-parse FETCH_HEAD)
-              if ! git merge-base --is-ancestor "$target_sha" "$gh_sha"; then
-                echo "::error::$name: $TARGET_NAME/$target_branch is not an ancestor of GitHub/$gh_branch (not append-only)"
-                exit 1
+            # ---- 3. 只问目标站这一个分支的 sha（git ls-remote） ----
+            if ! ls=$(retry git ls-remote "$target_url" "refs/heads/$gh_branch" 2>/dev/null); then
+              echo "::error::$name: git ls-remote on $TARGET_NAME failed"
+              failed=$((failed + 1))
+              continue
+            fi
+            target_sha=$(awk '{print $1; exit}' <<< "$ls")
+            sleep "$REQUEST_DELAY"
+
+            # ---- 4. 已经一致：nothing to do ----
+            if [ "$target_sha" = "$gh_sha" ]; then
+              echo "up-to-date $name ($gh_branch)"
+              uptodate=$((uptodate + 1))
+              continue
+            fi
+
+            # ---- 5. 需要同步：从 GitHub 取对象，本地做祖先检查，再 push ----
+            gh_url="https://github.com/$OWNER/$name.git"
+            if ! retry git fetch -q --no-tags "$gh_url" "$gh_branch"; then
+              echo "::error::$name: git fetch from GitHub failed"
+              failed=$((failed + 1))
+              continue
+            fi
+            fetched_sha=$(git rev-parse FETCH_HEAD)
+            if [ "$fetched_sha" != "$gh_sha" ]; then
+              # GraphQL 与 fetch 之间 GitHub 又有新提交：以实际 fetch 到的为准
+              gh_sha=$fetched_sha
+            fi
+
+            # 镜像站提交必须是 GitHub 的祖先，否则就不是单纯追加 commit：报错
+            # （目标 sha 不在 GitHub 历史中时，对象不存在，同样视为非祖先）
+            if [ -n "$target_sha" ]; then
+              if ! git cat-file -e "$target_sha^{commit}" 2>/dev/null \
+                 || ! git merge-base --is-ancestor "$target_sha" "$gh_sha"; then
+                echo "::error::$name: $TARGET_NAME/$gh_branch ($target_sha) is not an ancestor of GitHub/$gh_branch (not append-only)"
+                failed=$((failed + 1))
+                continue
               fi
             fi
 
             # 普通 push，不加 --force
-            git push -q "$target_url" "$gh_sha:refs/heads/$gh_branch"
-            echo "synced $name ($gh_branch) -> $TARGET_NAME"
-          done 3<<< "$repos"
+            if retry git push -q "$target_url" "$gh_sha:refs/heads/$gh_branch"; then
+              echo "synced $name ($gh_branch) -> $TARGET_NAME"
+              synced=$((synced + 1))
+            else
+              echo "::error::$name: git push to $TARGET_NAME failed"
+              failed=$((failed + 1))
+            fi
+            sleep "$REQUEST_DELAY"
+          done 3<<< "$gh_repos"
+
+          echo "Summary [$TARGET_NAME]: synced=$synced up-to-date=$uptodate skipped=$skipped failed=$failed"
+          if [ "$failed" -gt 0 ]; then
+            exit 1
+          fi
