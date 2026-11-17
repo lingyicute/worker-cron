@@ -17,11 +17,31 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Check UTC+8 quiet hours (01:00-07:00)
+        id: window
+        run: |
+          hour=$(TZ=Asia/Shanghai date +%-H)
+          if [ "$hour" -ge 1 ] && [ "$hour" -lt 7 ]; then
+            quiet=true
+          else
+            quiet=false
+          fi
+          echo "UTC+8 当前小时: $hour, quiet=$quiet"
+          echo "quiet=$quiet" >> "$GITHUB_OUTPUT"
+
       - name: Trigger sbwatch.yml in secureblue-watchdog
         env:
           GH_TOKEN: ${{ secrets.token1 }}
         run: |
           gh workflow run sbwatch.yml -R lingyicute/secureblue-watchdog
+
+      # UTC+8 01:00-07:00 不执行
+      - name: Trigger update.yml in repoPackage
+        if: ${{ steps.window.outputs.quiet != 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.token1 }}
+        run: |
+          gh workflow run update.yml -R lingyicute/repoPackage
 
       - name: Delete temp files
         run: |
@@ -32,7 +52,7 @@ jobs:
           echo "删除完成，当前变更："
           git status --short || true
 
-      - name: Commit and push as lingyicute
+      - name: Commit and push
         run: |
           git config user.name "lingyicute"
           git config user.email "160479206+lingyicute@users.noreply.github.com"
