@@ -17,8 +17,29 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # UTC+8 01:00-07:00 不执行（仅 push 等自动触发；手动 workflow_dispatch 不受限制）
+  gate:
+    name: Check UTC+8 quiet hours
+    runs-on: ubuntu-latest
+    outputs:
+      quiet: ${{ steps.window.outputs.quiet }}
+    steps:
+      - id: window
+        run: |
+          hour=$(TZ=Asia/Shanghai date +%-H)
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] \
+             && [ "$hour" -ge 1 ] && [ "$hour" -lt 7 ]; then
+            quiet=true
+          else
+            quiet=false
+          fi
+          echo "UTC+8 当前小时: $hour, quiet=$quiet"
+          echo "quiet=$quiet" >> "$GITHUB_OUTPUT"
+
   sync:
     name: Sync to ${{ matrix.name }}
+    needs: gate
+    if: ${{ needs.gate.outputs.quiet != 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
