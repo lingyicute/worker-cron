@@ -1,4 +1,4 @@
-name: Sync default branches to mirrors (Codeberg / GitLab / Gitea)
+name: Sync default branches to mirrors (Codeberg / GitLab / Gitea / Framagit / GitGud)
 
 on:
   workflow_dispatch:
@@ -66,6 +66,18 @@ jobs:
             owner: lingyicute
             git_user: lingyicute
             token_secret: GITEA_TOKEN
+          - name: Framagit
+            kind: gitlab
+            host: framagit.org
+            owner: lingyicute
+            git_user: oauth2
+            token_secret: FRAMAGIT_TOKEN
+          - name: GitGud
+            kind: gitlab
+            host: gitgud.io
+            owner: lingyicute
+            git_user: oauth2
+            token_secret: GITGUD_TOKEN
 
     steps:
       - name: Sync
