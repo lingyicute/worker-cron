@@ -197,6 +197,23 @@ jobs:
             done
           }
 
+          # GitLab 系（GitLab / Framagit / GitGud）默认分支被设为 protected，禁止 force push。
+          # force push 前先取消该分支的保护（DELETE protected_branches）。
+          #   204 / 200 → 已解除保护；404 → 本来就没有保护，同样视为成功。
+          # 单次尝试，外层用 retry 做退避重试（429 / 5xx / 网络错误会返回非 0）。
+          unprotect_branch() {
+            local pid=$1 branch=$2 enc code
+            enc=$(jq -rn --arg b "$branch" '$b|@uri')
+            code=$(curl -sS -o "$RUNNER_TEMP/unprotect.body" -w '%{http_code}' \
+              -X DELETE -H "$auth_header" \
+              "https://$TARGET_HOST/api/v4/projects/$pid/protected_branches/$enc") || code=000
+            case "$code" in
+              200|204|404) return 0 ;;
+            esac
+            echo "  HTTP $code unprotecting $branch (project $pid) on $TARGET_NAME: $(head -c 300 "$RUNNER_TEMP/unprotect.body" 2>/dev/null)" >&2
+            return 1
+          }
+
           # ---- 1. GitHub：一次性拿到 name / 默认分支 / HEAD sha ----------------
           gh_repos=$(retry gh api graphql --paginate \
             -f owner="$OWNER" \
@@ -215,6 +232,7 @@ jobs:
 
           # ---- 2. 目标站：分页列出已有仓库（name 默认分支） --------------------
           target_repos=""
+          target_ids=""   # 仅 GitLab 系："path 项目id"，force push 前解锁默认分支要用
           page=1
           next_url=""
           while :; do
@@ -232,6 +250,9 @@ jobs:
             lines=$(jq -r "$filter" <<< "$resp")
             [ -z "$lines" ] && break
             target_repos+="$lines"$'\n'
+            if [ "$TARGET_KIND" = gitlab ]; then
+              target_ids+="$(jq -r '.[] | "\(.path) \(.id)"' <<< "$resp")"$'\n'
+            fi
             if [ "$TARGET_KIND" = bitbucket ]; then
               next_url=$(jq -r '.next // empty' <<< "$resp")
               [ -z "$next_url" ] && break
@@ -275,6 +296,10 @@ jobs:
             fi
 
             target_branch=$(awk -v n="$tname" '$1==n{print $2; exit}' <<< "$target_repos")
+            target_pid=""
+            if [ "$TARGET_KIND" = gitlab ]; then
+              target_pid=$(awk -v n="$tname" '$1==n{print $2; exit}' <<< "$target_ids")
+            fi
 
             # 目标站是空仓库时 default_branch 可能为空，此时不做分支名比较
             if [ -n "$target_branch" ] && [ "$target_branch" != "$gh_branch" ]; then
@@ -355,6 +380,22 @@ jobs:
                   continue
                 fi
               fi
+            fi
+
+            if [ "$need_force" = 1 ] && [ "$TARGET_KIND" = gitlab ]; then
+              # GitLab 系：默认分支被锁定（protected），force push 前先解锁
+              if [ -z "$target_pid" ]; then
+                echo "::error::$name: cannot unprotect $gh_branch on $TARGET_NAME (project id unknown)"
+                failed=$((failed + 1))
+                continue
+              fi
+              echo "unprotecting $TARGET_NAME/$name ($gh_branch, project id $target_pid) before force push"
+              if ! retry unprotect_branch "$target_pid" "$gh_branch"; then
+                echo "::error::$name: failed to unprotect $gh_branch on $TARGET_NAME (token 需要 api 权限且为 Maintainer/Owner)"
+                failed=$((failed + 1))
+                continue
+              fi
+              sleep "$REQUEST_DELAY"
             fi
 
             if [ "$need_force" = 1 ]; then
