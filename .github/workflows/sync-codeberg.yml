@@ -440,6 +440,9 @@ jobs:
           done 3<<< "$gh_repos"
 
           echo "Summary [$TARGET_NAME]: synced=$synced forced=$forced up-to-date=$uptodate skipped=$skipped failed=$failed"
+          {
+            echo "### $TARGET_NAME Synced ($synced) Forced ($forced) Up to date ($uptodate) Skipped ($skipped) Failed ($failed)"
+          } >> "$GITHUB_STEP_SUMMARY"
           if [ "$forced" -gt 0 ]; then
             echo "::warning title=Force pushed repos on $TARGET_NAME::$forced 个仓库被 force push，详见日志与 Job Summary"
             {
