@@ -72,6 +72,12 @@ jobs:
             owner: lingyicute
             git_user: lingyicute
             token_secret: PUBSOLAR_TOKEN
+          - name: OpenCommit
+            kind: gitea
+            host: opencommit.eu
+            owner: lingyicute
+            git_user: lingyicute
+            token_secret: OC
           - name: GitLab
             kind: gitlab
             host: gitlab.com
