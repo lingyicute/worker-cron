@@ -20,7 +20,7 @@ jobs:
   # UTC+8 01:00-07:00 不执行（仅 push 等自动触发；手动 workflow_dispatch 不受限制）
   gate:
     name: Check UTC+8 quiet hours
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     outputs:
       quiet: ${{ steps.window.outputs.quiet }}
     steps:
@@ -40,7 +40,7 @@ jobs:
     name: Sync to ${{ matrix.name }}
     needs: gate
     if: ${{ needs.gate.outputs.quiet != 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     permissions:
       contents: read
 
@@ -466,7 +466,7 @@ jobs:
     name: Sync repoPackage tarball to Hugging Face
     needs: gate
     if: ${{ needs.gate.outputs.quiet != 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     permissions:
       contents: read
 
