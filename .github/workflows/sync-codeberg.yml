@@ -512,7 +512,7 @@ jobs:
           echo "GitHub $OWNER/$REPO: branch=$gh_branch, sha=$gh_sha"
 
           # 2. 克隆 Hugging Face Space（跳过 LFS 对象拉取，仅检出指针与普通文件）
-          hf_url="https://$HF_USER:$HF_TOKEN@huggingface.co/spaces/$HF_OWNER/$HF_SPACE.git"
+          hf_url="https://$HF_USER:$HF_TOKEN@huggingface.co/datasets/$HF_OWNER/$HF_SPACE.git"
           work_dir="$RUNNER_TEMP/hf-repoPackage"
           rm -rf "$work_dir"
           GIT_LFS_SKIP_SMUDGE=1 retry git clone -q --depth=20 "$hf_url" "$work_dir"
@@ -539,7 +539,7 @@ jobs:
           echo "Downloading tarball for $OWNER/$REPO ($gh_sha)..."
           retry download_tarball
 
-          # 5. 使用 Git LFS 追踪并提交推送到 Hugging Face Space
+          # 5. 使用 Git LFS 追踪并提交推送到 HF
           git lfs install --local
           git lfs track "*.tar.gz"
           mv -f "$tarball_tmp" "./$TARBALL_NAME"
