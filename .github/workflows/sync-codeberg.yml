@@ -434,3 +434,98 @@ jobs:
           if [ "$failed" -gt 0 ]; then
             exit 1
           fi
+
+  sync-huggingface:
+    name: Sync repoPackage tarball to Hugging Face
+    needs: gate
+    if: ${{ needs.gate.outputs.quiet != 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Sync repoPackage tarball via Git LFS
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0
+
+          OWNER=lingyicute
+          REPO=repoPackage
+          HF_OWNER=lingyicute
+          HF_SPACE=repoPackage
+          HF_USER=lingyicute
+          TARBALL_NAME="repoPackage.tar.gz"
+          MAX_ATTEMPTS=5
+
+          if [ -z "$HF_TOKEN" ]; then
+            echo "::error::Secret HF_TOKEN is not set (needed for Hugging Face)"
+            exit 1
+          fi
+
+          # 通用重试：指数退避 15s / 30s / 60s / 120s
+          retry() {
+            local n=1 delay=15
+            until "$@"; do
+              if [ "$n" -ge "$MAX_ATTEMPTS" ]; then
+                return 1
+              fi
+              echo "  attempt $n failed, retrying in ${delay}s: $1 $2" >&2
+              sleep "$delay"
+              n=$((n + 1))
+              delay=$((delay * 2))
+            done
+          }
+
+          # 1. 获取 GitHub 上 repoPackage 的默认分支与最新 commit sha
+          gh_branch=$(retry gh api "repos/$OWNER/$REPO" --jq '.default_branch')
+          gh_sha=$(retry gh api "repos/$OWNER/$REPO/commits/$gh_branch" --jq '.sha')
+          echo "GitHub $OWNER/$REPO: branch=$gh_branch, sha=$gh_sha"
+
+          # 2. 克隆 Hugging Face Space（跳过 LFS 对象拉取，仅检出指针与普通文件）
+          hf_url="https://$HF_USER:$HF_TOKEN@huggingface.co/spaces/$HF_OWNER/$HF_SPACE.git"
+          work_dir="$RUNNER_TEMP/hf-repoPackage"
+          rm -rf "$work_dir"
+          GIT_LFS_SKIP_SMUDGE=1 retry git clone -q --depth=20 "$hf_url" "$work_dir"
+          cd "$work_dir"
+
+          # 3. 若上次针对该 tarball 的提交已是同一个 GitHub commit sha，直接跳过下载
+          if [ -f "$TARBALL_NAME" ] \
+             && git log -n 1 --pretty=%B -- "$TARBALL_NAME" | grep -qF "$gh_sha"; then
+            echo "up-to-date $REPO ($gh_sha) on Hugging Face"
+            exit 0
+          fi
+
+          # 4. 下载 repoPackage 的 tarball
+          tarball_tmp="$RUNNER_TEMP/$TARBALL_NAME"
+          download_tarball() {
+            curl -fL --connect-timeout 30 --max-time 600 \
+              -H "Accept: application/vnd.github+json" \
+              ${GH_TOKEN:+-H "Authorization: Bearer $GH_TOKEN"} \
+              "https://api.github.com/repos/$OWNER/$REPO/tarball/$gh_sha" \
+              -o "$tarball_tmp.part" \
+              && [ -s "$tarball_tmp.part" ] \
+              && mv -f "$tarball_tmp.part" "$tarball_tmp"
+          }
+          echo "Downloading tarball for $OWNER/$REPO ($gh_sha)..."
+          retry download_tarball
+
+          # 5. 使用 Git LFS 追踪并提交推送到 Hugging Face Space
+          git lfs install --local
+          git lfs track "*.tar.gz"
+          mv -f "$tarball_tmp" "./$TARBALL_NAME"
+
+          git config user.name "lingyicute"
+          git config user.email "160479206+lingyicute@users.noreply.github.com"
+          git add .gitattributes "$TARBALL_NAME"
+
+          if git diff --cached --quiet; then
+            echo "up-to-date $REPO ($gh_sha) on Hugging Face (no content diff)"
+            exit 0
+          fi
+
+          git commit -q -m "chore: sync $REPO tarball ($gh_sha)"
+          retry git push -q origin HEAD
+          echo "synced $TARBALL_NAME ($gh_sha) -> Hugging Face ($HF_OWNER/$HF_SPACE)"
