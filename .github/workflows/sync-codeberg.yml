@@ -305,6 +305,12 @@ jobs:
             if [ "$TARGET_KIND" = bitbucket ]; then
               tname=${name,,}
             fi
+            if [ "$TARGET_KIND" = gitea ] && [ "$name" = "$OWNER" ]; then
+              if [ "$(awk -v n=".profile" '$1==n{c++} END{print c+0}' <<< "$target_repos")" != 0 ]; then
+                tname=.profile
+                echo "map $name -> $tname on $TARGET_NAME (.profile is treated as $OWNER)"
+              fi
+            fi
 
             # 目标站上没同名仓库：跳过
             if [ "$(awk -v n="$tname" '$1==n{c++} END{print c+0}' <<< "$target_repos")" = 0 ]; then
