@@ -96,6 +96,12 @@ jobs:
             owner: lingyicute
             git_user: oauth2
             token_secret: GITGUD_TOKEN
+          - name: git.gay
+            kind: gitea
+            host: git.gay
+            owner: lingyicute
+            git_user: lingyicute
+            token_secret: GAY
           - name: Bitbucket
             kind: bitbucket
             host: bitbucket.org
