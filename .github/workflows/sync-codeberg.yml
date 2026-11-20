@@ -54,6 +54,24 @@ jobs:
             owner: lingyicute
             git_user: lingyicute
             token_secret: CODEBERG_TOKEN
+          - name: Codefloe
+            kind: gitea
+            host: codefloe.com
+            owner: lingyicute
+            git_user: lingyicute
+            token_secret: CODEFLOE_TOKEN
+          - name: Disroot
+            kind: gitea
+            host: git.disroot.org
+            owner: lingyicute
+            git_user: lingyicute
+            token_secret: DR_TOKEN
+          - name: pub.solar
+            kind: gitea
+            host: git.pub.solar
+            owner: lingyicute
+            git_user: lingyicute
+            token_secret: PUBSOLAR_TOKEN
           - name: GitLab
             kind: gitlab
             host: gitlab.com
