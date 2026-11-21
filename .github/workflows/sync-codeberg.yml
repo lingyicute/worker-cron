@@ -323,10 +323,11 @@ jobs:
               url="${next_url:-https://api.bitbucket.org/2.0/repositories/$TARGET_OWNER?pagelen=100}"
               filter='.values[] | "\(.slug) \(.mainbranch.name // "")"'
             elif [ "$TARGET_KIND" = tangled ]; then
-              # 每个仓库对应用户 PDS 里一条 org.tangled.repo.declaration，rkey 即仓库名；
+              # 每个仓库对应用户 PDS 里一条 org.tangled.repo.declaration，rkey 即（小写的）仓库名；
               # 默认分支这里拿不到，留空，稍后用 git ls-remote --symref 获取
               url="$tangled_pds/xrpc/com.atproto.repo.listRecords?repo=$tangled_did&collection=org.tangled.repo.declaration&limit=100${cursor:+&cursor=$cursor}"
-              filter='.records[] | "\(.uri | sub(".*/"; "")) "'
+              # Tangled 仓库名一律小写：这里再 ascii_downcase 一次，保证与 tname 比较时大小写一致
+              filter='.records[] | "\(.uri | sub(".*/"; "") | ascii_downcase) "'
             else
               url="https://$TARGET_HOST/api/v1/users/$TARGET_OWNER/repos?limit=50&page=$page"
               filter='.[] | "\(.name) \(.default_branch // "")"'
@@ -371,9 +372,10 @@ jobs:
           while read -r name gh_branch gh_sha <&3; do
             [ -z "$name" ] && continue
 
-            # 目标站上的仓库名：Bitbucket 的 slug 全部小写，其余站点与 GitHub 同名
+            # 目标站上的仓库名：Bitbucket 的 slug、Tangled 的仓库名（rkey）全部小写，
+            # 其余站点与 GitHub 同名
             tname=$name
-            if [ "$TARGET_KIND" = bitbucket ]; then
+            if [ "$TARGET_KIND" = bitbucket ] || [ "$TARGET_KIND" = tangled ]; then
               tname=${name,,}
             fi
             if [ "$TARGET_KIND" = gitea ] && [ "$name" = "$OWNER" ]; then
