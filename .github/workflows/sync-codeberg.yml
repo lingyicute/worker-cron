@@ -78,6 +78,12 @@ jobs:
             owner: lingyicute
             git_user: lingyicute
             token_secret: OC
+          - name: tildegit
+            kind: gitea
+            host: tildegit.org
+            owner: lingyicute
+            git_user: lingyicute
+            token_secret: TILDE
           - name: GitLab
             kind: gitlab
             host: gitlab.com
