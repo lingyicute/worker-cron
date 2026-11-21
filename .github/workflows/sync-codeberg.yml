@@ -66,6 +66,12 @@ jobs:
             owner: lingyicute
             git_user: lingyicute
             token_secret: DR_TOKEN
+          - name: envs
+            kind: gitea
+            host: git.envs.net
+            owner: lingyicute
+            git_user: lingyicute
+            token_secret: ENVS_TK
           - name: pub.solar
             kind: gitea
             host: git.pub.solar
