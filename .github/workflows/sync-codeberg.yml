@@ -1,4 +1,4 @@
-name: Sync default branches to mirrors (Codeberg / GitLab / Gitea / Framagit / GitGud / Bitbucket)
+name: Sync default branches to mirrors (Codeberg / GitLab / Gitea / Framagit / GitGud / Bitbucket / Tangled)
 
 on:
   workflow_dispatch:
@@ -114,6 +114,12 @@ jobs:
             owner: lingyicute
             git_user: x-bitbucket-api-token-auth
             token_secret: BITBUCKET_TOKEN
+          - name: Tangled
+            kind: tangled
+            host: tangled.org
+            owner: lingyicute.tngl.sh
+            git_user: git
+            token_secret: TANGLED_SSH_KEY
 
     steps:
       - name: Sync
@@ -171,9 +177,30 @@ jobs:
             done
           }
 
+          # Tangled：准备 SSH 私钥
+          if [ "$TARGET_KIND" = tangled ]; then
+            if ! command -v ssh >/dev/null 2>&1 || ! command -v ssh-keygen >/dev/null 2>&1; then
+              SUDO=""; command -v sudo >/dev/null 2>&1 && SUDO=sudo
+              $SUDO apt-get update -qq && $SUDO apt-get install -y -qq openssh-client
+            fi
+            ssh_dir="$RUNNER_TEMP/tangled-ssh"
+            mkdir -p "$ssh_dir"
+            chmod 700 "$ssh_dir"
+            # 去掉可能混入的 CR，并保证以换行结尾（否则 OpenSSH 会报 invalid format）
+            printf '%s\n' "$TARGET_TOKEN" | tr -d '\r' > "$ssh_dir/id"
+            chmod 600 "$ssh_dir/id"
+            if ! ssh-keygen -y -f "$ssh_dir/id" >/dev/null 2>&1; then
+              echo "::error::$TOKEN_SECRET_NAME is not a valid unencrypted SSH private key"
+              exit 1
+            fi
+            export GIT_SSH_COMMAND="ssh -i $ssh_dir/id -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$ssh_dir/known_hosts -o ConnectTimeout=30 -o ServerAliveInterval=15"
+          fi
+
           # 带 429/5xx 处理的 API GET：成功时把响应体输出到 stdout
           if [ "$TARGET_KIND" = gitlab ]; then
             auth_header="PRIVATE-TOKEN: $TARGET_TOKEN"
+          elif [ "$TARGET_KIND" = tangled ]; then
+            auth_header=""   # Tangled 用 SSH 私钥，不走 HTTP token
           else
             auth_header="Authorization: token $TARGET_TOKEN"
           fi
@@ -260,8 +287,31 @@ jobs:
                   | select(.defaultBranchRef != null)
                   | "\(.name) \(.defaultBranchRef.name) \(.defaultBranchRef.target.oid)"')
 
+          # ---- 2a. Tangled：handle -> DID -> PDS ----
+          tangled_did=""
+          tangled_pds=""
+          if [ "$TARGET_KIND" = tangled ]; then
+            tangled_did=$(api_get_noauth "https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle?handle=$TARGET_OWNER" | jq -r '.did // empty') || tangled_did=""
+            if [ -z "$tangled_did" ]; then
+              tangled_did=$(api_get_noauth "https://$TARGET_OWNER/.well-known/atproto-did" | tr -d '[:space:]') || tangled_did=""
+            fi
+            case "$tangled_did" in
+              did:plc:*) did_doc_url="https://plc.directory/$tangled_did" ;;
+              did:web:*) did_doc_url="https://${tangled_did#did:web:}/.well-known/did.json" ;;
+              *) echo "::error::Cannot resolve Tangled handle $TARGET_OWNER to a DID"; exit 1 ;;
+            esac
+            tangled_pds=$(api_get_noauth "$did_doc_url" \
+              | jq -r '.service[] | select(.type=="AtprotoPersonalDataServer") | .serviceEndpoint' | head -n1) || tangled_pds=""
+            if [ -z "$tangled_pds" ]; then
+              echo "::error::Cannot find PDS for $tangled_did"
+              exit 1
+            fi
+            echo "Tangled: $TARGET_OWNER -> $tangled_did (PDS: $tangled_pds)"
+          fi
+
           # ---- 2. 目标站：分页列出已有仓库（name 默认分支） --------------------
           target_repos=""
+          cursor=""
           target_ids=""   # 仅 GitLab 系："path 项目id"，force push 前解锁默认分支要用
           page=1
           next_url=""
@@ -272,6 +322,11 @@ jobs:
             elif [ "$TARGET_KIND" = bitbucket ]; then
               url="${next_url:-https://api.bitbucket.org/2.0/repositories/$TARGET_OWNER?pagelen=100}"
               filter='.values[] | "\(.slug) \(.mainbranch.name // "")"'
+            elif [ "$TARGET_KIND" = tangled ]; then
+              # 每个仓库对应用户 PDS 里一条 org.tangled.repo.declaration，rkey 即仓库名；
+              # 默认分支这里拿不到，留空，稍后用 git ls-remote --symref 获取
+              url="$tangled_pds/xrpc/com.atproto.repo.listRecords?repo=$tangled_did&collection=org.tangled.repo.declaration&limit=100${cursor:+&cursor=$cursor}"
+              filter='.records[] | "\(.uri | sub(".*/"; "")) "'
             else
               url="https://$TARGET_HOST/api/v1/users/$TARGET_OWNER/repos?limit=50&page=$page"
               filter='.[] | "\(.name) \(.default_branch // "")"'
@@ -286,6 +341,10 @@ jobs:
             if [ "$TARGET_KIND" = bitbucket ]; then
               next_url=$(jq -r '.next // empty' <<< "$resp")
               [ -z "$next_url" ] && break
+            fi
+            if [ "$TARGET_KIND" = tangled ]; then
+              cursor=$(jq -r '.cursor // empty' <<< "$resp")
+              [ -z "$cursor" ] && break
             fi
             page=$((page + 1))
             sleep "$REQUEST_DELAY"
@@ -344,15 +403,36 @@ jobs:
               continue
             fi
 
-            target_url="https://$TARGET_GIT_USER:$TARGET_TOKEN@$TARGET_HOST/$TARGET_OWNER/$tname.git"
+            if [ "$TARGET_KIND" = tangled ]; then
+              # SSH 认证（见上面的 GIT_SSH_COMMAND），URL 中不含任何凭据
+              target_url="$TARGET_GIT_USER@$TARGET_HOST:$TARGET_OWNER/$tname"
+            else
+              target_url="https://$TARGET_GIT_USER:$TARGET_TOKEN@$TARGET_HOST/$TARGET_OWNER/$tname.git"
+            fi
 
             # ---- 3. 只问目标站这一个分支的 sha（git ls-remote） ----
-            if ! ls=$(retry git ls-remote "$target_url" "refs/heads/$gh_branch" 2>/dev/null); then
-              echo "::error::$name: git ls-remote on $TARGET_NAME failed"
-              failed=$((failed + 1))
-              continue
+            if [ "$TARGET_KIND" = tangled ]; then
+              # 同一次 ls-remote 里顺带取 HEAD 的 symref（= Tangled 上的默认分支）
+              if ! ls=$(retry git ls-remote --symref "$target_url" HEAD "refs/heads/$gh_branch" 2>"$RUNNER_TEMP/lsremote.err"); then
+                echo "::error::$name: git ls-remote on $TARGET_NAME failed: $(head -c 300 "$RUNNER_TEMP/lsremote.err")"
+                failed=$((failed + 1))
+                continue
+              fi
+              target_branch=$(awk '$1=="ref:"{sub("^refs/heads/","",$2); print $2; exit}' <<< "$ls")
+              target_sha=$(awk -v r="refs/heads/$gh_branch" '$1!="ref:" && $2==r{print $1; exit}' <<< "$ls")
+              if [ -n "$target_branch" ] && [ "$target_branch" != "$gh_branch" ]; then
+                echo "::error::$name: default branch differs (GitHub: $gh_branch, $TARGET_NAME: $target_branch)"
+                failed=$((failed + 1))
+                continue
+              fi
+            else
+              if ! ls=$(retry git ls-remote "$target_url" "refs/heads/$gh_branch" 2>/dev/null); then
+                echo "::error::$name: git ls-remote on $TARGET_NAME failed"
+                failed=$((failed + 1))
+                continue
+              fi
+              target_sha=$(awk '{print $1; exit}' <<< "$ls")
             fi
-            target_sha=$(awk '{print $1; exit}' <<< "$ls")
             sleep "$REQUEST_DELAY"
 
             # ---- 4. 已经一致：nothing to do ----
