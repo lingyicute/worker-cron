@@ -120,6 +120,12 @@ jobs:
             owner: lingyicute
             git_user: lingyicute
             token_secret: GAY
+          - name: bolha.dev
+            kind: gitea
+            host: bolha.dev
+            owner: lingyicute
+            git_user: lingyicute
+            token_secret: BOLHA
           - name: Bitbucket
             kind: bitbucket
             host: bitbucket.org
