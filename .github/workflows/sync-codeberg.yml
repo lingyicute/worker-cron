@@ -1,4 +1,4 @@
-name: Sync default branches to mirrors (Codeberg / GitLab / Gitea / Framagit / GitGud / Bitbucket / Tangled)
+name: Sync default branches to mirrors (Codeberg / GitLab / Gitea / Framagit / GitGud / Bitbucket / Tangled / Gitoro)
 
 on:
   workflow_dispatch:
@@ -138,6 +138,12 @@ jobs:
             owner: lingyicute.tngl.sh
             git_user: git
             token_secret: TANGLED_SSH_KEY
+          - name: Gitoro
+            kind: gitoro
+            host: gitoro.com
+            owner: lingyicute
+            git_user: lingyicute
+            token_secret: GITORO
 
     steps:
       - name: Sync
@@ -219,6 +225,8 @@ jobs:
             auth_header="PRIVATE-TOKEN: $TARGET_TOKEN"
           elif [ "$TARGET_KIND" = tangled ]; then
             auth_header=""   # Tangled 用 SSH 私钥，不走 HTTP token
+          elif [ "$TARGET_KIND" = gitoro ]; then
+            auth_header="Authorization: Bearer $TARGET_TOKEN"
           else
             auth_header="Authorization: token $TARGET_TOKEN"
           fi
@@ -340,6 +348,11 @@ jobs:
             elif [ "$TARGET_KIND" = bitbucket ]; then
               url="${next_url:-https://api.bitbucket.org/2.0/repositories/$TARGET_OWNER?pagelen=100}"
               filter='.values[] | "\(.slug) \(.mainbranch.name // "")"'
+            elif [ "$TARGET_KIND" = gitoro ]; then
+              # Gitoro REST API：GET /v1/workspaces/{workspace}/repositories（需 Bearer token），
+              # 返回仓库数组；仓库 slug 取自 clone_url 的最后一段（去掉 .git）
+              url="https://api.$TARGET_HOST/v1/workspaces/$TARGET_OWNER/repositories"
+              filter='.[] | "\(.clone_url | sub("/$"; "") | sub("\\.git$"; "") | sub(".*/"; "") | ascii_downcase) \(.default_branch // "")"'
             elif [ "$TARGET_KIND" = tangled ]; then
               # 每个仓库对应用户 PDS 里一条 org.tangled.repo.declaration，rkey 即（小写的）仓库名；
               # 默认分支这里拿不到，留空，稍后用 git ls-remote --symref 获取
@@ -350,12 +363,20 @@ jobs:
               url="https://$TARGET_HOST/api/v1/users/$TARGET_OWNER/repos?limit=50&page=$page"
               filter='.[] | "\(.name) \(.default_branch // "")"'
             fi
-            resp=$(api_get_noauth "$url") || { echo "::error::Failed to list repos on $TARGET_NAME"; exit 1; }
+            if [ "$TARGET_KIND" = gitoro ]; then
+              # Gitoro 列表接口需要认证
+              resp=$(api_get "$url") || { echo "::error::Failed to list repos on $TARGET_NAME (token 需要 workspace/code 读权限)"; exit 1; }
+            else
+              resp=$(api_get_noauth "$url") || { echo "::error::Failed to list repos on $TARGET_NAME"; exit 1; }
+            fi
             lines=$(jq -r "$filter" <<< "$resp")
             [ -z "$lines" ] && break
             target_repos+="$lines"$'\n'
             if [ "$TARGET_KIND" = gitlab ]; then
               target_ids+="$(jq -r '.[] | "\(.path) \(.id)"' <<< "$resp")"$'\n'
+            fi
+            if [ "$TARGET_KIND" = gitoro ]; then
+              break   # 一次请求返回全部仓库，无分页
             fi
             if [ "$TARGET_KIND" = bitbucket ]; then
               next_url=$(jq -r '.next // empty' <<< "$resp")
@@ -390,10 +411,10 @@ jobs:
           while read -r name gh_branch gh_sha <&3; do
             [ -z "$name" ] && continue
 
-            # 目标站上的仓库名：Bitbucket 的 slug、Tangled 的仓库名（rkey）全部小写，
+            # 目标站上的仓库名：Bitbucket 的 slug、Tangled 的仓库名（rkey）、Gitoro 的 slug 全部小写，
             # 其余站点与 GitHub 同名
             tname=$name
-            if [ "$TARGET_KIND" = bitbucket ] || [ "$TARGET_KIND" = tangled ]; then
+            if [ "$TARGET_KIND" = bitbucket ] || [ "$TARGET_KIND" = tangled ] || [ "$TARGET_KIND" = gitoro ]; then
               tname=${name,,}
             fi
             if [ "$TARGET_KIND" = gitea ] && [ "$name" = "$OWNER" ]; then
