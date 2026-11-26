@@ -1,4 +1,4 @@
-name: Sync default branches to mirrors (Codeberg / GitLab / Gitea / Framagit / GitGud / Bitbucket / Tangled / Gitoro)
+name: Sync default branches to mirrors (Codeberg / GitLab / Gitea / Framagit / GitGud / Bitbucket / Tangled / Gitoro / SourceForge)
 
 on:
   workflow_dispatch:
@@ -144,6 +144,12 @@ jobs:
             owner: lingyicute
             git_user: lingyicute
             token_secret: GITORO
+          - name: SourceForge
+            kind: sourceforge
+            host: git.code.sf.net
+            owner: lingyicute
+            git_user: lingyicute
+            token_secret: SF_KEY
 
     steps:
       - name: Sync
@@ -201,13 +207,13 @@ jobs:
             done
           }
 
-          # Tangled：准备 SSH 私钥
-          if [ "$TARGET_KIND" = tangled ]; then
+          # Tangled / SourceForge：准备 SSH 私钥
+          if [ "$TARGET_KIND" = tangled ] || [ "$TARGET_KIND" = sourceforge ]; then
             if ! command -v ssh >/dev/null 2>&1 || ! command -v ssh-keygen >/dev/null 2>&1; then
               SUDO=""; command -v sudo >/dev/null 2>&1 && SUDO=sudo
               $SUDO apt-get update -qq && $SUDO apt-get install -y -qq openssh-client
             fi
-            ssh_dir="$RUNNER_TEMP/tangled-ssh"
+            ssh_dir="$RUNNER_TEMP/ssh-$TARGET_KIND"
             mkdir -p "$ssh_dir"
             chmod 700 "$ssh_dir"
             # 去掉可能混入的 CR，并保证以换行结尾（否则 OpenSSH 会报 invalid format）
@@ -223,8 +229,8 @@ jobs:
           # 带 429/5xx 处理的 API GET：成功时把响应体输出到 stdout
           if [ "$TARGET_KIND" = gitlab ]; then
             auth_header="PRIVATE-TOKEN: $TARGET_TOKEN"
-          elif [ "$TARGET_KIND" = tangled ]; then
-            auth_header=""   # Tangled 用 SSH 私钥，不走 HTTP token
+          elif [ "$TARGET_KIND" = tangled ] || [ "$TARGET_KIND" = sourceforge ]; then
+            auth_header=""   # Tangled / SourceForge 用 SSH 私钥，不走 HTTP token
           elif [ "$TARGET_KIND" = gitoro ]; then
             auth_header="Authorization: Bearer $TARGET_TOKEN"
           else
@@ -353,6 +359,9 @@ jobs:
               # 返回仓库数组；仓库 slug 取自 clone_url 的最后一段（去掉 .git）
               url="https://api.$TARGET_HOST/v1/workspaces/$TARGET_OWNER/repositories"
               filter='.[] | "\(.clone_url | sub("/$"; "") | sub("\\.git$"; "") | sub(".*/"; "") | ascii_downcase) \(.default_branch // "")"'
+            elif [ "$TARGET_KIND" = sourceforge ]; then
+              url="https://sourceforge.net/rest/u/$TARGET_OWNER/profile/"
+              filter='.projects[] | "\(.name | gsub("\\s"; "_") | ascii_downcase) "'
             elif [ "$TARGET_KIND" = tangled ]; then
               # 每个仓库对应用户 PDS 里一条 org.tangled.repo.declaration，rkey 即（小写的）仓库名；
               # 默认分支这里拿不到，留空，稍后用 git ls-remote --symref 获取
@@ -374,6 +383,11 @@ jobs:
             target_repos+="$lines"$'\n'
             if [ "$TARGET_KIND" = gitlab ]; then
               target_ids+="$(jq -r '.[] | "\(.path) \(.id)"' <<< "$resp")"$'\n'
+            fi
+            if [ "$TARGET_KIND" = sourceforge ]; then
+              # "小写显示名 项目unix名"
+              target_ids+="$(jq -r '.projects[] | "\(.name | gsub("\\s"; "_") | ascii_downcase) \(.url | sub("^/p/"; "") | sub("/$"; ""))"' <<< "$resp")"$'\n'
+              break   # 一次请求返回全部项目，无分页
             fi
             if [ "$TARGET_KIND" = gitoro ]; then
               break   # 一次请求返回全部仓库，无分页
@@ -414,7 +428,7 @@ jobs:
             # 目标站上的仓库名：Bitbucket 的 slug、Tangled 的仓库名（rkey）、Gitoro 的 slug 全部小写，
             # 其余站点与 GitHub 同名
             tname=$name
-            if [ "$TARGET_KIND" = bitbucket ] || [ "$TARGET_KIND" = tangled ] || [ "$TARGET_KIND" = gitoro ]; then
+            if [ "$TARGET_KIND" = bitbucket ] || [ "$TARGET_KIND" = tangled ] || [ "$TARGET_KIND" = gitoro ] || [ "$TARGET_KIND" = sourceforge ]; then
               tname=${name,,}
             fi
             if [ "$TARGET_KIND" = gitea ] && [ "$name" = "$OWNER" ]; then
@@ -436,6 +450,15 @@ jobs:
             if [ "$TARGET_KIND" = gitlab ]; then
               target_pid=$(awk -v n="$tname" '$1==n{print $2; exit}' <<< "$target_ids")
             fi
+            sf_project=""
+            if [ "$TARGET_KIND" = sourceforge ]; then
+              sf_project=$(awk -v n="$tname" '$1==n{print $2; exit}' <<< "$target_ids")
+              if [ -z "$sf_project" ]; then
+                echo "::error::$name: cannot resolve SourceForge project unix name"
+                failed=$((failed + 1))
+                continue
+              fi
+            fi
 
             # 目标站是空仓库时 default_branch 可能为空，此时不做分支名比较
             if [ -n "$target_branch" ] && [ "$target_branch" != "$gh_branch" ]; then
@@ -447,13 +470,16 @@ jobs:
             if [ "$TARGET_KIND" = tangled ]; then
               # SSH 认证（见上面的 GIT_SSH_COMMAND），URL 中不含任何凭据
               target_url="$TARGET_GIT_USER@$TARGET_HOST:$TARGET_OWNER/$tname"
+            elif [ "$TARGET_KIND" = sourceforge ]; then
+              # SSH 认证；git 工具的挂载点（mount point）是 "code"（GitHub 导入器创建的项目均如此）
+              target_url="ssh://$TARGET_GIT_USER@$TARGET_HOST/p/$sf_project/code"
             else
               target_url="https://$TARGET_GIT_USER:$TARGET_TOKEN@$TARGET_HOST/$TARGET_OWNER/$tname.git"
             fi
 
             # ---- 3. 只问目标站这一个分支的 sha（git ls-remote） ----
-            if [ "$TARGET_KIND" = tangled ]; then
-              # 同一次 ls-remote 里顺带取 HEAD 的 symref（= Tangled 上的默认分支）
+            if [ "$TARGET_KIND" = tangled ] || [ "$TARGET_KIND" = sourceforge ]; then
+              # 同一次 ls-remote 里顺带取 HEAD 的 symref（= 目标站上的默认分支）
               if ! ls=$(retry git ls-remote --symref "$target_url" HEAD "refs/heads/$gh_branch" 2>"$RUNNER_TEMP/lsremote.err"); then
                 echo "::error::$name: git ls-remote on $TARGET_NAME failed: $(head -c 300 "$RUNNER_TEMP/lsremote.err")"
                 failed=$((failed + 1))
