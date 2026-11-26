@@ -149,7 +149,7 @@ jobs:
             host: git.code.sf.net
             owner: lingyicute
             git_user: lingyicute
-            token_secret: SF_KEY
+            token_secret: TANGLED_SSH_KEY
 
     steps:
       - name: Sync
